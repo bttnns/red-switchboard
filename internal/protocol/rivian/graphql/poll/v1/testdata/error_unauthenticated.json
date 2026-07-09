@@ -1,0 +1,9 @@
+{
+  "errors": [
+    {
+      "message": "Not authenticated",
+      "extensions": { "code": "UNAUTHENTICATED", "reason": "SESSION_EXPIRED" }
+    }
+  ],
+  "data": null
+}

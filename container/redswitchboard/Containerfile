@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1
+#
+# Multi-stage build for the redswitchboard provider proxy, on Red Hat UBI.
+#
+# Build context is the REPO ROOT (the Go module lives at the repo root and the
+# single main package at ./cmd/redswitchboard), so always build with:
+#
+#   docker build -f container/redswitchboard/Dockerfile -t redswitchboard:0.1.0 .
+#
+# (compose already sets context: ../.. and dockerfile: container/redswitchboard/Dockerfile)
+
+# ---- build stage (Red Hat UBI go-toolset) ----------------------------------
+FROM registry.access.redhat.com/ubi9/go-toolset:1.25 AS build
+
+# go-toolset defaults to an unprivileged user; build as root so the copied
+# sources and the module/build caches are writable, then discard this stage.
+USER 0
+WORKDIR /src
+
+# Cache module downloads: copy manifests first, then fetch.
+COPY go.mod go.sum* ./
+RUN go mod download
+
+# Copy the rest of the module and compile the single static binary. redswitchboard
+# is one grouped CLI: `serve` (the proxy), `mock` (the boundary fake), and the
+# inspect/discover subcommands. CGO is disabled so the binary is fully static and
+# runs on ubi-minimal with no glibc/runtime deps.
+COPY . ./
+RUN CGO_ENABLED=0 GOOS=linux go build \
+        -trimpath \
+        -ldflags="-s -w" \
+        -o /out/redswitchboard \
+        ./cmd/redswitchboard
+
+# ---- runtime stage (Red Hat UBI minimal) -----------------------------------
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.6
+
+# CA roots for outbound TLS to the upstream vendor API. The binary is static, so
+# this is the only runtime dependency.
+RUN microdnf install -y ca-certificates \
+    && microdnf clean all \
+    && rm -rf /var/cache/yum
+
+# Config and source creds are provided via mounts (see compose). The default
+# config path matches the mount target in compose.yaml.
+COPY --from=build /out/redswitchboard /usr/local/bin/redswitchboard
+
+# The sink's API surface listens on 4000 inside the compose network (never published).
+EXPOSE 4000
+
+# Run unprivileged. A static binary needs no /etc/passwd entry, so a bare numeric
+# UID (group 0 for OpenShift arbitrary-UID compatibility) is enough.
+USER 1001:0
+ENTRYPOINT ["/usr/local/bin/redswitchboard"]
+CMD ["serve"]

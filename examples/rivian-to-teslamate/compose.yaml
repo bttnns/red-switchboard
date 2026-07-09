@@ -1,0 +1,146 @@
+# redswitchboard + stock TeslaMate v4 stack.
+#
+# Stock, unmodified TeslaMate v4.0.1 is pointed at our `redswitchboard` provider
+# proxy via the Tesla Fleet API third-party-provider env block (TESLA_API_HOST /
+# TESLA_AUTH_HOST / TESLA_AUTH_PATH / TOKEN). TeslaMate, Postgres and Grafana are
+# all official pinned images and never forked.
+#
+# Quick start (Docker):
+#   cd ..                # repo root, where .env lives
+#   cp .env.example .env && $EDITOR .env
+#   docker compose -f examples/rivian-to-teslamate/compose.yaml up -d
+#   open http://localhost:4000   (TeslaMate UI)   and   http://localhost:3000 (Grafana)
+#
+# See examples/rivian-to-teslamate/README.md for Podman and Apple `container` (macOS) instructions
+# and the full operational runbook.
+#
+# Ports:
+#   teslamate     -> host 4000  (web UI)
+#   grafana       -> host 3000  (dashboards)
+#   redswitchboard   -> NOT published; listens on 4000 only inside this network
+#                    (publishing it would collide with TeslaMate's host 4000).
+#   database      -> NOT published.
+
+services:
+  # ---------------------------------------------------------------------------
+  # Stock TeslaMate v4 -- pointed at redswitchboard as its Fleet API provider.
+  # ---------------------------------------------------------------------------
+  teslamate:
+    image: teslamate/teslamate:4.0.1
+    restart: always
+    environment:
+      # --- core / db ---
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - DATABASE_USER=${TM_DB_USER}
+      - DATABASE_PASS=${TM_DB_PASS}
+      - DATABASE_NAME=${TM_DB_NAME}
+      - DATABASE_HOST=${TM_DB_HOST}
+      # --- MQTT off (drops the mosquitto service); see commented block below ---
+      - DISABLE_MQTT=true
+      # --- Fleet API third-party-provider block -> redswitchboard ---
+      # Mirrors TeslaMate's api.md MyTeslaMate/Teslemetry block, but the host is
+      # our in-network proxy. TOKEN keeps the literal "?token=" prefix, which
+      # also hides the token fields on the sign-in page (one-click sign-in).
+      - TESLA_API_HOST=${TESLA_API_HOST}
+      - TESLA_AUTH_HOST=${TESLA_AUTH_HOST}
+      - TESLA_AUTH_PATH=${TESLA_AUTH_PATH}
+      - TOKEN=${TOKEN}
+      # NOTE: TESLA_WSS_HOST is intentionally UNSET. Streaming is disabled
+      # per-car in the TeslaMate UI (use_streaming_api=false), not via env.
+    ports:
+      - "4000:4000"
+    cap_drop:
+      - all
+    depends_on:
+      database:
+        condition: service_healthy
+      redswitchboard:
+        condition: service_started
+
+  # ---------------------------------------------------------------------------
+  # redswitchboard -- the vendor-agnostic translator (this repo). Rivian -> Tesla
+  # is the wired pair today. Built from container/redswitchboard/Containerfile with the
+  # REPO ROOT as context (the Go module lives at the repo root, ..).
+  # ---------------------------------------------------------------------------
+  redswitchboard:
+    build:
+      context: ../..
+      dockerfile: container/redswitchboard/Containerfile
+    image: redswitchboard:0.1.0
+    restart: always
+    environment:
+      # Shared secret matched against the incoming ?token= from TeslaMate.
+      - REDSWITCHBOARD_TOKEN=${REDSWITCHBOARD_TOKEN}
+    command: ["serve", "--config", "/config/redswitchboard.yaml"]
+    volumes:
+      # Example config (source/sink selection, poll intervals, creds path, port).
+      - ../../config/redswitchboard.yaml:/config/redswitchboard.yaml:ro
+      # Source credentials, written out-of-band by `redswitchboard auth`.
+      - ../../data/rivian:/data
+    # Listens on :4000 inside the network only -- deliberately NOT published.
+    expose:
+      - "4000"
+
+  # ---------------------------------------------------------------------------
+  # Postgres 18 -- TeslaMate's datastore. v4 mounts the PG data volume at
+  # /var/lib/postgresql (NOT /var/lib/postgresql/data).
+  # ---------------------------------------------------------------------------
+  database:
+    image: postgres:18-trixie
+    restart: always
+    environment:
+      - POSTGRES_USER=${TM_DB_USER}
+      - POSTGRES_PASSWORD=${TM_DB_PASS}
+      - POSTGRES_DB=${TM_DB_NAME}
+    volumes:
+      - teslamate-db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TM_DB_USER} -d ${TM_DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Grafana -- TeslaMate's dashboards (host :3000).
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: teslamate/grafana:4.0.1
+    restart: always
+    environment:
+      - DATABASE_USER=${TM_DB_USER}
+      - DATABASE_PASS=${TM_DB_PASS}
+      - DATABASE_NAME=${TM_DB_NAME}
+      - DATABASE_HOST=${TM_DB_HOST}
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASS}
+    ports:
+      - "3000:3000"
+    volumes:
+      - teslamate-grafana-data:/var/lib/grafana
+    depends_on:
+      database:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # OPTIONAL: MQTT broker. Disabled by default (DISABLE_MQTT=true on teslamate).
+  # To enable: uncomment this service, remove DISABLE_MQTT above, add
+  # `- MQTT_HOST=mosquitto` to teslamate's environment, and add a
+  # `mosquitto: condition: service_started` under teslamate's depends_on. Also
+  # uncomment the two mosquitto-* volumes at the bottom.
+  # ---------------------------------------------------------------------------
+  # mosquitto:
+  #   image: eclipse-mosquitto:2
+  #   restart: always
+  #   command: mosquitto -c /mosquitto-no-auth.conf
+  #   # ports:
+  #   #   - "1883:1883"
+  #   volumes:
+  #     - mosquitto-conf:/mosquitto/config
+  #     - mosquitto-data:/mosquitto/data
+
+volumes:
+  teslamate-db:
+  teslamate-grafana-data:
+  # mosquitto-conf:
+  # mosquitto-data:

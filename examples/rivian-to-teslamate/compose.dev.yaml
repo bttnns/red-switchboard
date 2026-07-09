@@ -1,0 +1,69 @@
+# Local-dev override for the redswitchboard stack: run everything against the
+# boundary source fake (`redswitchboard mock`), with NO car and NO Rivian login.
+#
+# Usage (from the repo root):
+#   docker compose -f examples/rivian-to-teslamate/compose.yaml -f examples/rivian-to-teslamate/compose.dev.yaml up -d --build
+#   open http://localhost:4000   (TeslaMate)     http://localhost:3000 (Grafana)
+#
+# Drive the simulation from the host (the mock publishes :5050):
+#   curl -XPOST localhost:5050/mock/scenario/driving
+#   curl -XPOST localhost:5050/mock/scenario/charging
+#   curl        localhost:5050/mock/scenario           # read current scenarios
+#
+# This override:
+#   - adds the mock service (the same redswitchboard image, `mock` subcommand),
+#   - repoints redswitchboard at the dev config (base_url -> mock) and the static
+#     dev creds (mock tokens; no `rivian_auth` login needed).
+
+services:
+  # The fake Rivian GraphQL API (`redswitchboard mock`). It serves real-time data
+  # and AUTO-CYCLES each car drive -> idle -> charge -> idle (default --cycle), so
+  # the live stack always has something happening now. To populate previous days
+  # (the history the derived dashboards need), generate a TeslaFi CSV backfill from
+  # the HOST and import it -- see the example README:
+  #   redswitchboard mock --since 3d --import-dir ./import \
+  #     --teslamate-compose "docker compose -f examples/rivian-to-teslamate/compose.yaml \
+  #       -f examples/rivian-to-teslamate/compose.dev.yaml"
+  mock:
+    image: redswitchboard:0.1.0
+    build:
+      context: ../..
+      dockerfile: container/redswitchboard/Containerfile
+    restart: always
+    entrypoint: ["/usr/local/bin/redswitchboard"]
+    # Env-overridable so the stack can point at a different source protocol
+    # (MOCK_PROTOCOL) and its matching vehicles. Defaults reproduce the Rivian dev
+    # stack (GUIDs/VINs match config/dev/data/rivian.json).
+    command:
+      - "mock"
+      - "--protocol=${MOCK_PROTOCOL:-rivian-graphql-poll-v1}"
+      - "--addr=:5050"
+      - "--vehicles=${MOCK_VEHICLES:-RIV0MOCK00000001/7FCTGAAA0NN000001/Mock R1T/R1T,RIV0MOCK00000002/7FCTGAAA0NN000002/Mock R1S/R1S}"
+    ports:
+      - "5050:5050" # published so you can POST /mock/scenario/* from the host
+
+  # Mount a host import dir into TeslaMate so the CSV the host-run `mock --since`
+  # writes is visible to TeslaMate's importer (triggered via --teslamate-exec).
+  teslamate:
+    environment:
+      - IMPORT_DIR=/import
+    volumes:
+      - ../../import:/import
+
+  redswitchboard:
+    depends_on:
+      mock:
+        condition: service_started
+    # Override the active source (sink stays tesla-fleet-poll-v1 for TeslaMate). The dev
+    # config carries a source block for each protocol, all pointing base_url at the
+    # mock; SOURCE selects which one is active.
+    command: ["serve", "--config", "/config/redswitchboard.yaml", "--source", "${SOURCE:-rivian-graphql-poll-v1}"]
+    volumes:
+      # Dev config (base_url -> mock) over the production example.
+      - ../../config/dev/redswitchboard.yaml:/config/redswitchboard.yaml:ro
+      # Dev creds DIRECTORY (mock tokens for every source: rivian.json,
+      # tesla.json, tesla-owner.json). One directory mount REPLACES the base
+      # service's `../../data/rivian:/data`, so whichever SOURCE is active finds
+      # its creds file. (Mounting the individual files INTO /data instead nests
+      # binds under the base /data bind, which fails on macOS Docker/virtiofs.)
+      - ../../config/dev/data:/data:ro

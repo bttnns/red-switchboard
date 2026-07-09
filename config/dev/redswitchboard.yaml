@@ -1,0 +1,61 @@
+# redswitchboard DEV configuration: points the rivian source at the boundary fake
+# (`redswitchboard mock`) instead of the real Rivian cloud, so the whole stack runs
+# with NO car and NO Rivian login. Used by examples/rivian-to-teslamate/compose.dev.yaml (mounted over
+# /config/redswitchboard.yaml).
+#
+# The only differences from the production example (config/redswitchboard.yaml) are
+# the source base_url (the fake) and faster poll intervals (so scenarios show up
+# quickly). The creds file is the static, checked-in dev creds (mock tokens)
+# whose vehicle GUID matches the mock's default --vehicles.
+
+listen_addr: ":4000"
+source: rivian-graphql-poll-v1
+sink: tesla-fleet-poll-v1
+
+sources:
+  rivian-graphql-poll-v1:
+    creds_file: "/data/rivian.json"
+    base_url: "http://mock:5050/api/gql"
+    car_type: "model3"
+    model: "R1T"
+    # Per-VIN override: the second dev vehicle is an R1S. Exercises the
+    # multi-vehicle per-VIN config and the sink's trim_badging.
+    vehicles:
+      7FCTGAAA0NN000002:
+        model: "R1S"
+        display_name: "Mock R1S"
+
+  # Tesla sources, for the e2e run against a tesla-fleet / tesla-owner mock
+  # (SOURCE=tesla-fleet-poll-v1 / tesla-owner-poll-v1). base_url points at the same mock,
+  # which serves that protocol's API. The Tesla sink path uses /api/1 (no /api/gql).
+  tesla-fleet-poll-v1:
+    creds_file: "/data/tesla.json"
+    base_url: "http://mock:5050"
+  tesla-owner-poll-v1:
+    creds_file: "/data/tesla-owner.json"
+    base_url: "http://mock:5050"
+
+sinks:
+  tesla-fleet-poll-v1:
+    provider_token: "local"
+
+poll:
+  online: "5s"
+  driving: "3s"
+  charging: "3s"
+  asleep: "10s"
+  default: "5s"
+  stale_after: "30m"
+  # Lower the hard floor so the fast dev cadences above (3s) actually take
+  # effect; production keeps the safe 5s default. The other poll tunables
+  # (max_backoff, jitter_pct, awake_backoff_cap) keep their built-in defaults.
+  min_interval: "1s"
+
+# http / server keep their built-in defaults in dev; shown here for reference.
+# Against the boundary fake a shorter client timeout surfaces hangs faster.
+http:
+  timeout: "10s"
+
+server:
+  read_header_timeout: "10s"
+  shutdown_timeout: "5s"

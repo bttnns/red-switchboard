@@ -1,0 +1,18 @@
+{
+  "data": {
+    "getLiveSessionData": {
+      "__typename": "LiveSessionData",
+      "vehicleChargerState": { "value": "charging_active", "updatedAt": "2026-06-15T12:00:00.000Z" },
+      "power": { "value": 11.2, "updatedAt": "2026-06-15T12:00:00.000Z" },
+      "current": { "value": 48.0, "updatedAt": "2026-06-15T12:00:00.000Z" },
+      "kilometersChargedPerHour": { "value": 62.5, "updatedAt": "2026-06-15T12:00:00.000Z" },
+      "rangeAddedThisSession": { "value": 85.0, "updatedAt": "2026-06-15T12:00:00.000Z" },
+      "soc": { "value": 78.5, "updatedAt": "2026-06-15T12:00:00.000Z" },
+      "timeRemaining": { "value": "5400", "updatedAt": "2026-06-15T12:00:00.000Z" },
+      "totalChargedEnergy": { "value": 17.3, "updatedAt": "2026-06-15T12:00:00.000Z" },
+      "timeElapsed": 3600,
+      "currentPrice": 6.42,
+      "currentCurrency": "USD"
+    }
+  }
+}

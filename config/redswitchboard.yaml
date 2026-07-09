@@ -1,0 +1,213 @@
+# redswitchboard configuration (example)
+#
+# This file is mounted read-only into the redswitchboard container at
+# /config/redswitchboard.yaml (see examples/rivian-to-teslamate/compose.yaml). The binary reads it on
+# `serve`. Copy/edit values to taste; secrets stay in .env.
+#
+# redswitchboard is a hub: an input SOURCE plugin reads a vendor API and maps it to
+# one neutral model, and an output SINK plugin serves that model in some external
+# API's shape. `source:` / `sink:` pick the active plugins; each plugin reads its
+# own sub-block under `sources:` / `sinks:`. Every field has a built-in default,
+# so a partial file is always safe. Durations are Go duration strings.
+
+# Address the sink's API surface listens on INSIDE the compose network. For the
+# Tesla sink this must stay :4000 to match TESLA_API_HOST/TESLA_AUTH_HOST.
+listen_addr: ":4000"
+
+# Active input source and output sink plugins. Rivian -> Tesla is the wired pair.
+# Plugin names are protocol-versioned: rivian-graphql-poll-v1, tesla-fleet-poll-v1,
+# tesla-owner-poll-v1. Each protocol can act as both a source and a sink.
+source: rivian-graphql-poll-v1
+sink: tesla-fleet-poll-v1
+
+sources:
+  rivian-graphql-poll-v1:
+    # Path to the Rivian credentials file written by the rivian_auth tool.
+    # In-container path; compose mounts ./data/rivian -> /data.
+    creds_file: "/data/rivian.json"
+
+    # Rivian GraphQL API root. For LOCAL DEV with no car, point this at the
+    # boundary fake: base_url: "http://mock:5050/api/gql" (`redswitchboard mock`).
+    base_url: "https://rivian.com/api/gql"
+
+    # car_type is the cosmetic Tesla vehicle code the Tesla sink stores. It does
+    # NOT mean your car is a Tesla; it only satisfies TeslaMate's schema (a null
+    # crashes its FSM). Valid: model3 / models / modelx / modely / cybertruck.
+    car_type: "model3"
+
+    # model maps to the sink's trim_badging (cosmetic). Rivian: R1T / R1S / R2.
+    model: "R1T"
+
+    # display_name optionally overrides the car name. Empty falls back to the
+    # Rivian account vehicle name, then "Rivian".
+    display_name: ""
+
+    # timeout bounds each source HTTP request so a hung upstream cannot stall the
+    # poll loop.
+    timeout: "30s"
+
+    # Per-VIN overrides for a multi-vehicle account (mixed R1T/R1S). Example:
+    #   vehicles:
+    #     7FCTGAAA0NN000001:
+    #       model: "R1S"
+    #       display_name: "The R1S"
+
+sinks:
+  tesla-fleet-poll-v1:
+    # Cosmetic provider token reported to TeslaMate.
+    provider_token: "local"
+    # Optional path to persist the canonical-id -> synthetic int64 id mapping.
+    # idmap_file: "/data/idmap.json"
+    # Optional static bearer that gates the live-data read routes (P14). UNSET
+    # (the default) leaves the surface unauthenticated, exactly as before. When
+    # set, every consumer must send "Authorization: Bearer <auth_token>" on
+    # /api/1/products, /api/1/vehicles, /api/1/vehicles/{id}[/vehicle_data|
+    # /source_extras], /status, /stats, or it gets 401. The /api/oauth2/v3/token
+    # bootstrap stays open and returns this value as the access_token, so a
+    # consumer that signs in here ends up holding the bearer the reads require.
+    # MUST also be set on the consumer (TeslaMate, see docs/DEPLOYMENT-NOTES.md):
+    # enabling it on only one side breaks polling. Keep it secret; never log it.
+    # auth_token: "change-me-to-a-long-random-string"
+
+# Poll intervals: how often redswitchboard refreshes its cached snapshot, chosen by
+# the derived vehicle state. The sink serves from cache, so polling the source
+# slowly never makes consumers lag. The loop also adds +-10% jitter, enforces the
+# min_interval floor, and backs off exponentially on errors.
+#
+# These defaults match the RIVIAN source, mirroring the Home Assistant rivian
+# integration's cadence (charging 30s plugged / 15m idle, ~30s general). The Tesla
+# sources want faster active intervals; see poll_overrides below. (Long term,
+# streaming will replace polling for live state where the vendor supports it.)
+poll:
+  online: "30s"    # awake but parked
+  driving: "60s"   # shift in D/R/N (fast fallback; a stream fills live position between polls)
+  driving_streaming: "2m"     # drive cadence while a telemetry stream is fresh (snaps back to driving on a stall); 0 disables (needs a stream cache)
+  stream_fresh_within: "60s"  # how recently a stream frame must have arrived for the drive backoff to engage
+  charging: "30s"  # active charge (AC / default)
+  charging_dc: "60s"          # active charge while DC fast charging (SOC moves fast); 0 collapses to charging
+  dc_threshold_kw: 25         # power (kW) at/above which a charge counts as DC when the source gives no fast-charger flag
+  asleep: "15m"    # power=sleep (HA: 15m idle/unplugged)
+  default: "30s"   # fallback
+
+  # stale_after is the cache age past which the top-level vehicle state degrades
+  # to "offline", so a source outage mid-drive cannot leave a phantom infinite
+  # drive. 0 disables the guard.
+  stale_after: "30m"
+
+  # min_interval is the hard floor on the poll cadence (and the minimum error
+  # backoff): the loop never calls the source faster than this, whatever the
+  # per-state intervals above say. The default is a safe rate-limit guard.
+  min_interval: "5s"
+  # max_backoff caps the exponential backoff applied on repeated source errors
+  # or rate limits.
+  max_backoff: "15m"
+  # jitter_pct is the +-randomization (as a fraction, 0.1 = +-10%) applied to
+  # each scheduled poll so multiple vehicles never poll in lockstep.
+  jitter_pct: 0.1
+  # awake_backoff_cap bounds how far an awake-but-parked car's cadence may
+  # stretch under change-adaptive backoff, capping worst-case latency to notice
+  # a drive/charge start. Driving and charging cadences are never stretched.
+  awake_backoff_cap: "5m"
+  # quota_block_floor is the near-fixed backoff applied on a billing/quota
+  # block (a 403 "account disabled: EXCEEDED_LIMIT"-style cap that clears only
+  # when the limit is raised or the cycle resets, i.e. hours to days). NOT
+  # exponential: the block is sustained, so an exponential-from-min_interval
+  # cadence would hammer a dead API. A server Retry-After (which can be hours)
+  # still wins when present.
+  quota_block_floor: "1h"
+
+# poll_overrides: per-source cadence, overlaid on the `poll` block above (only the
+# keys set here change; the rest fall back to `poll`). Each protocol provider can
+# thus have its own polling config. The active `source:` selects which override
+# applies. The Tesla APIs are rate-limited and bill per call, so their IDLE states
+# poll slower than the Rivian-tuned defaults (the cache makes idle slowness free
+# downstream), active states stay reasonably fast as an interim until streaming
+# ingest lands. See docs/SETUP.md (poll cadence) for the rationale and sources.
+poll_overrides:
+  tesla-fleet-poll-v1:
+    driving: "60s"            # fast fallback; Fleet Telemetry streaming fills live position between polls
+    driving_streaming: "2m"   # back off while the stream is fresh
+    stream_fresh_within: "60s"
+    charging: "10m"           # AC: slow and flat, needs little resolution
+    charging_dc: "60s"        # DC fast charge: SOC moves fast, a missed stop is costly
+    dc_threshold_kw: 25
+    online: "5m"        # awake-but-parked rarely changes; change-adaptive stretch goes further
+    asleep: "30m"       # never wake a sleeping car just to poll (a wake is the priciest Fleet op)
+    min_interval: "10s"
+  tesla-owner-poll-v1:
+    driving: "5s"       # owner stream is near pass-through; fast poll only as fallback
+    charging: "10s"
+    online: "2m"
+    asleep: "30m"
+    min_interval: "5s"  # honor a 429 Retry-After (can be hours) over this floor
+
+# http: outbound HTTP client settings applied to EVERY source's client. A
+# per-source `timeout` (under sources.<name>) still overrides http.timeout. The
+# defaults are conservative and safe; tune only if a source needs more headroom.
+http:
+  timeout: "30s"        # per-request backstop when a source sets no timeout
+  retries: 2            # automatic retries on transient (network/429/5xx) failures
+  retry_wait: "500ms"   # base wait between retries (grows with backoff)
+  retry_max_wait: "5s"  # cap on the retry wait
+
+# server: inbound HTTP server settings for the sink's API surface.
+server:
+  # read_header_timeout bounds how long the server waits for request headers,
+  # guarding against slow-client (Slowloris-style) stalls.
+  read_header_timeout: "10s"
+  # shutdown_timeout bounds graceful shutdown on SIGINT/SIGTERM before the
+  # server is forced closed.
+  shutdown_timeout: "5s"
+
+# stream: optional streaming path. When both source and sink below are empty
+# (the default), the serve path is the polling-only path unchanged. Set sink to
+# tesla-fleet-stream-v1 to serve TeslaMate's data:update WebSocket from the cache
+# (the cost win: consumers pull drive data over WSS instead of polling Tesla).
+# Set source to a streaming source (tesla-fleet-stream-v1 for Fleet Telemetry,
+# Phase 2) to fill the cache from pushed telemetry. The streaming sink owns its
+# OWN listener (consumer-facing wss://) separate from the internal REST sink.
+# stream:
+#   sink: tesla-fleet-stream-v1
+#   # Persist the last-served AsOf high-water mark per vehicle so the merge cache's
+#   # monotonic AsOf clamp survives a restart (a backwards-moving served timestamp
+#   # otherwise re-triggers TeslaMate's stale-fetch discard storm). Same /data volume
+#   # as idmap_file; omit for in-memory only.
+#   asof_file: "/data/asof.json"
+#   # Bounded on-disk ring of recent merged snapshots per vehicle so a TRS or
+#   # TeslaMate restart mid-drive does not drop in-flight frames: on reconnect the
+#   # ring is replayed to the consumer in order (complements asof_file). Same /data
+#   # volume as idmap_file; omit to disable (zero overhead).
+#   replay_file: "/data/replay.json"
+#   replay_depth: 256        # per-vehicle ring bound (oldest evicted); 0 = built-in default
+#   sources:
+#     tesla-fleet-stream-v1:
+#       listen_addr: ":4443"   # mTLS listener for Fleet Telemetry (Phase 2)
+#   sinks:
+#     tesla-fleet-stream-v1:
+#       listen_addr: ":4001"   # consumer-facing WSS
+#       max_push_hz: 1.0       # coalesce cache changes to 1 frame/sec per consumer
+#       max_consumers: 16
+#       # tls:                   # direct wss:// (omit for a TLS-terminating proxy)
+#       #   cert_file: /data/cert.pem
+#       #   key_file: /data/key.pem
+
+# commands: optional signed-command write path (Phase 4). Gated OFF by default:
+# when enabled is false (the default) the command REST routes are not mounted and
+# no write path exists in the binary (the read-only guarantee). When enabled,
+# red-switchboard signs and submits Vehicle Command Protocol messages in-process
+# via the vendored vehicle-command SDK (no tesla-http-proxy sidecar), exposing
+# the same POST /api/1/vehicles/{vin}/command/{cmd} surface the proxy serves, so
+# a consumer (e.g. evcc) repoints onto red-switchboard with no URL changes.
+#
+# Prerequisites (see docs/SETUP.md, Commands): generate an EC keypair, host the
+# public key at https://<app-domain>/.well-known/appspecific/com.tesla.3p.public-key.pem,
+# and enroll it in each vehicle's keychain (Tesla's virtual-key flow). CredsFile
+# is the SAME Fleet OAuth creds file the source reads (one token for reads AND
+# writes).
+commands:
+  enabled: true
+  plugin: tesla-command-v1
+  key_file: "/data/tesla-command.pem"    # EC private key (prime256v1) for signing
+  creds_file: "/data/tesla.json"         # Fleet OAuth creds (shared with the source)
+  # cache_file: "/data/tesla-command-cache.json"  # optional; fewer handshake calls across restarts
+  timeout: "30s"                         # per-command deadline

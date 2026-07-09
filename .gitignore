@@ -1,0 +1,55 @@
+# Environment variables
+.env
+
+# Authentication data / credentials / runtime data
+/data/
+auth.json
+rivian.json
+*.creds
+*.mfa
+# Exception: the local-dev creds are mock tokens (no real account), and the dev
+# compose stack mounts them. Safe to track.
+!config/dev/rivian.creds
+
+# Built binaries
+/redswitchboard
+
+# Go specific
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# IDE specific
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Local reference repos (third-party API clients/docs, not part of this project)
+/research/
+/PLAN.md
+
+# Local incident/analysis data (DB exports, GPS traces, redacted configs): never commit
+/triage/
+
+# Instance ops/init helper scripts (mint creds, apply signed telemetry config):
+# reference this deployment's paths/domains, kept local to the box, never committed
+/scripts/
+
+# Claude Code local state + agent worktrees (tooling, never committed)
+/.claude/
