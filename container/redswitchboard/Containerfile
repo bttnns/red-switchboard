@@ -10,7 +10,7 @@
 # (compose already sets context: ../.. and dockerfile: container/redswitchboard/Dockerfile)
 
 # ---- build stage (Red Hat UBI go-toolset) ----------------------------------
-FROM registry.access.redhat.com/ubi9/go-toolset:1.25 AS build
+FROM registry.access.redhat.com/ubi9/go-toolset:9.8 AS build
 
 # go-toolset defaults to an unprivileged user; build as root so the copied
 # sources and the module/build caches are writable, then discard this stage.
